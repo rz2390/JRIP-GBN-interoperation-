@@ -1,0 +1,136 @@
+#!/usr/bin/env python
+import os,sys,argparse,random,time,socket,json,threading,select,tabulate
+
+parser=argparse.ArgumentParser()
+parser.add_argument('-p', type=int, dest="port", default=7999)
+parser.add_argument('hosts',nargs="+")
+inputArgs=parser.parse_args()
+
+port=inputArgs.port
+hosts=inputArgs.hosts
+inf=float("inf")
+
+hostname=socket.gethostname()
+hostipEX=socket.gethostbyname(hostname)
+selfHost='127.0.0.1'+":"+str(port)
+
+def hostParse(host):
+	hostIP=host.split(":")[0]
+	hostPort=host.split(":")[1]
+	return hostIP,hostPort
+
+def hostParse1(host):
+	hostIP=host.split(":")[0]
+	hostPort=host.split(":")[1]
+	hostCost=host.split(":")[2]
+	return hostIP,hostPort,hostCost
+
+neighborWeight={}
+for host in hosts:
+	hostIP,hostPort,hostCost=hostParse1(host)
+	neighborWeight[hostIP+":"+hostPort]=float(hostCost)
+
+def expandTable(myTable,receivePacket,addr):
+	global selfHost
+	updateFlag=False
+	addrString=addr[0]+":"+str(addr[1])
+	keysMy=[]
+	for key in myTable[selfHost].keys():
+		keysMy.append(key)
+	keysReceive=[]
+	for key in receivePacket[addrString].keys():
+		keysReceive.append(key)
+	myTable[addrString]=receivePacket[addrString]
+	for keyR in keysReceive:
+		if keyR not in keysMy:
+			myTable[selfHost][keyR]=[neighborWeight[addrString]+receivePacket[addrString][keyR][0],addrString]
+			updateFlag=True
+		else:
+			if float(myTable[selfHost][keyR][0])>receivePacket[addrString][keyR][0]+neighborWeight[addrString]:
+				updateFlag=True
+				myTable[selfHost][keyR][0]=receivePacket[addrString][keyR][0]+neighborWeight[addrString]
+				myTable[selfHost][keyR][1]=addrString
+	return updateFlag
+
+def initialTable():
+	packet={}
+	packet[selfHost]={}
+	packet[selfHost][selfHost]=[float(0),selfHost]
+	for host in hosts:
+		hostIP,hostPort,hostCost=hostParse1(host)
+		packet[selfHost][hostIP+":"+hostPort]=[float(hostCost),hostIP+":"+hostPort]
+	return packet 
+
+def initialPacket():
+	packet={}
+	DATA={}
+	DATA['Type']='JRIP'
+	DATA['RIPTable']=[]
+	packet['SEQ']=0
+	packet['ACK']=0
+	packet['Data']=DATA
+	return packet
+
+def displayTable():
+	column1="destination"
+	column2="distance"
+	column3="next_hop"
+	destRow=myTable[selfHost]
+	destKeys=[]
+	for key in myTable[selfHost].keys():
+		destKeys.append(key)
+	table=[]
+	columnNames=[column1,column2,column3]
+	table.append(columnNames)
+	for dest in destKeys:
+		row=[]
+		row.append(dest)
+		row.append(myTable[selfHost][dest][0])
+		row.append(myTable[selfHost][dest][1])
+		table.append(row)
+	print(tabulate.tabulate(table))
+
+def tracePacket(recvPacket,myTable,sock):
+	ripTable=myTable
+	dest=recvPacket['Data']['Destination']
+	recvPacket['Data']['TRACE'].append(selfHost)
+	if dest==selfHost:
+		hostIP,hostPort=hostParse(recvPacket['Data']['Origin'])
+		sock.sendto(json.dumps(recvPacket),(hostIP,int(hostPort)))
+	else:
+		hostIP,hostPort=hostParse(ripTable[selfHost][dest][1])
+		sock.sendto(json.dumps(recvPacket),(hostIP,int(hostPort)))
+
+def TenSecondSend(sock):
+	while True:
+		displayTable()
+		for host in hosts:
+			hostIP,hostPort,hostCost=hostParse1(host)
+			sendPacket['Data']['RIPTable']=myTable
+			sock.sendto(json.dumps(sendPacket),(hostIP,int(hostPort))) 
+		time.sleep(10)
+
+sendPacket=initialPacket()
+myTable=initialTable()
+
+sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
+sock.bind(('',port))
+
+t=threading.Thread(target = TenSecondSend, args = (sock,))
+t.daemon=True
+t.start()
+updateFlag=True
+
+while True:
+	if updateFlag:
+		for host in hosts:
+			hostIP,hostPort,hostCost=hostParse1(host)
+			sendPacket['Data']['RIPTable']=myTable
+			sock.sendto(json.dumps(sendPacket),(hostIP,int(hostPort)))
+	data,addr=sock.recvfrom(1024)
+	receivePacket=json.loads(data)
+	if receivePacket['Data']['Type']=='JRIP':
+		updateFlag=expandTable(myTable,receivePacket['Data']['RIPTable'],addr)
+	else:
+		tracePacket(receivePacket,myTable,sock)
+

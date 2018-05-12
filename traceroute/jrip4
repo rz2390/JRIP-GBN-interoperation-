@@ -1,0 +1,52 @@
+#!/usr/bin/env python
+import os,sys,argparse,random,time,socket,json,threading,select,tabulate
+
+parser=argparse.ArgumentParser()
+parser.add_argument('-p', type=int, dest="port", default=7999)
+parser.add_argument('hosts',nargs="+")
+inputArgs=parser.parse_args()
+
+def initialPacket():
+	packet={}
+	DATA={}
+	DATA["Type"]='TRACE'
+	DATA["Destination"]=destination
+	DATA["Origin"]=selfHost
+	DATA["TRACE"]=[]
+	packet["SEQ"]=0
+	packet["ACK"]=0
+	packet["Data"]=DATA
+	return packet
+
+def hostParse(host):
+	hostIP=host.split(":")[0]
+	hostPort=host.split(":")[1]
+	return hostIP,hostPort
+
+def TenSecondSend(tracePacket,sock):
+	while True:
+		sock.sendto(json.dumps(tracePacket),origin) 
+		time.sleep(10)
+
+inf=float("inf")
+port=inputArgs.port
+hosts=inputArgs.hosts
+originIP,originPort=hostParse(hosts[0])
+origin=(originIP,int(originPort))
+destination=hosts[1]
+selfHost='127.0.0.1:'+str(port)
+sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
+sock.bind(('',port))
+tracePacket=initialPacket()
+print(tracePacket['Data']['Origin'])
+t=threading.Thread(target = TenSecondSend, args = (tracePacket,sock))
+t.daemon=True
+t.start()
+while True:
+	data,addr=sock.recvfrom(1024)
+	receivePacket=json.loads(data)
+	path=receivePacket['Data']['TRACE']
+	print(path)
+
+
+

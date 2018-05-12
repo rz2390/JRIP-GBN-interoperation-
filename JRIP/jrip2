@@ -1,0 +1,115 @@
+#!/usr/bin/env python
+import socket,sys,time,random,json,argparse,select
+from collections import deque
+
+parser=argparse.ArgumentParser()
+parser.add_argument('-l', type=float, dest="loss", default=0.1)
+parser.add_argument('-p', type=int, dest="port", default=7999)
+parser.add_argument('hosts',nargs="+")
+inputArgs=parser.parse_args()
+
+loss=inputArgs.loss
+port=inputArgs.port
+hosts=inputArgs.hosts
+
+def hostParse(host):
+	hostIP=host.split(":")[0]
+	hostPort=host.split(":")[1]
+	hostCost=host.split(":")[2]
+	return hostIP,hostPort,hostCost
+
+def packetInit():
+	packet={}
+	packet['SEQ']=0
+	packet['ACK']=0
+	packet['DATA']={}
+	packet['DATA']['Type']='JRIP'
+	packet['DATA']['RIPTable']=[]
+	for host in hosts:
+		RIPelement={}
+		hostIP,hostPort,hostCost=hostParse(host)
+		RIPelement['Dest']=hostIP+":"+hostPort
+		RIPelement['Next']=hostIP+":"+hostPort
+		RIPelement['Cost']=hostIP+":"+hostPort
+		packet['DATA']['RIPTable'].append(RIPelement)
+	return packet
+
+def sendACK(sock,seq,Naddr):
+	packet=packetInit()
+	packet['ACK']=seq
+	packet['SEQ']=-1
+	packet['DATA']=None
+	sendpacket=json.dumps(packet)
+	if random.random()>=loss:
+		sock.sendto(sendpacket,Naddr)
+
+def sendPacket(sock,seq,Naddr):
+	packet=packetInit()
+	packet['SEQ']=seq
+	packet['ACK']=0
+	sendpacket=json.dumps(packet)
+	if random.random()>=loss:
+		sock.sendto(sendpacket,Naddr)
+
+nHash={}
+for host in hosts:
+	hostIP,hostPort,hostCost=hostParse(host)
+	hostKey=(hostIP,int(hostPort))
+	nHash[hostKey]={}
+	nHash[hostKey]['window']=deque()
+	nHash[hostKey]['acknum']=0
+	nHash[hostKey]['count']=0
+	nHash[hostKey]['printFlag']=True
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(('', port))
+sock.settimeout(0.001)
+sock.setblocking(0)
+
+for host in hosts:
+	hostIP,hostPort,hostCost=hostParse(host)
+	hostAddr=(hostIP,int(hostPort))
+	for i in range(5):
+		sendPacket(sock,i,hostAddr)
+		nHash[hostAddr]['window'].append([i,time.time()])
+
+while True:
+	r,w,e=select.select([sock],[],[],0.5)
+	for s in r:
+		data,addr=s.recvfrom(1024)
+		recvPacket=json.loads(data)
+		seq=recvPacket['SEQ']
+		ack=recvPacket['ACK']
+		if recvPacket['DATA']!=None:
+			if nHash[addr]['acknum']==seq:
+				nHash[addr]['acknum']+=1
+			sendACK(sock,nHash[addr]['acknum'],addr)
+		else:
+			if ack==100 and nHash[addr]['printFlag']:
+				print("Goodput:",str(100),"/",nHash[addr]['count'], "addr:",addr)
+				nHash[addr]['printFlag']=False
+			if ack>nHash[addr]['window'][0][0]:
+				while nHash[addr]['window'][0][0]<ack:
+					nHash[addr]['window'].popleft()
+					nHash[addr]['window'][0][1]=time.time()
+					nextseq=nHash[addr]['window'][-1][0]+1
+					sendPacket(sock,nextseq,addr)
+					nHash[addr]['count']+=1
+					nHash[addr]['window'].append([nextseq,time.time()])
+	for host in hosts:
+		hostIP,hostPort,hostCost=hostParse(host)
+		hostAddr=(hostIP,int(hostPort))
+		if time.time()-0.5>=nHash[hostAddr]['window'][0][1]:
+			resendseq=[]
+			for item in nHash[hostAddr]['window']:
+				resendseq.append(item[0])
+			nHash[hostAddr]['window'].clear()
+			for seqnum in resendseq:
+				sendPacket(sock,seqnum,hostAddr)
+				nHash[hostAddr]['count']+=1
+				nHash[hostAddr]['window'].append([seqnum,time.time()])
+
+
+
+
+

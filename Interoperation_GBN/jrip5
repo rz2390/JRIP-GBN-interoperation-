@@ -1,0 +1,232 @@
+#!/usr/bin/env python
+import os,sys,argparse,random,time,socket,json,threading,select,tabulate
+from collections import deque
+
+parser=argparse.ArgumentParser()
+parser.add_argument('-l', type=float, dest="loss", default=0.1)
+parser.add_argument('-p', type=int, dest="port", default=7999)
+parser.add_argument('hosts',nargs="+")
+inputArgs=parser.parse_args()
+
+loss=inputArgs.loss
+port=inputArgs.port
+hosts=inputArgs.hosts
+inf=float("inf")
+
+hostname=socket.gethostname()
+hostipEX=socket.gethostbyname(hostname)
+selfHost=hostipEX+":"+str(port)
+
+def hostParse2(host):
+	hostIP=host.split(":")[0]
+	hostPort=host.split(":")[1]
+	return hostIP,hostPort
+
+def hostParse1(host):
+	hostIP=host.split(":")[0]
+	hostPort=host.split(":")[1]
+	hostCost=host.split(":")[2]
+	return hostIP,hostPort,hostCost
+
+neighborWeight={}
+for host in hosts:
+	hostIP,hostPort,hostCost=hostParse1(host)
+	neighborWeight[hostIP+":"+hostPort]=float(hostCost)
+
+def convertForm1(rPT,addrString):
+	recvP={}
+	recvP[addrString]={}
+	for J in rPT:
+		recvP[addrString][J['Dest']]=[J['Cost'],J['Next']]
+	return recvP
+
+def convertForm2(myTable):
+	keysMy=[]
+	for key in myTable[selfHost].keys():
+		keysMy.append(key)
+	sendP=[]
+	for dest in keysMy:
+		sendPe={}
+		sendPe['Dest']=dest
+		sendPe['Next']=myTable[selfHost][dest][1]
+		sendPe['Cost']=myTable[selfHost][dest][0]
+		sendP.append(sendPe)
+	sendPacket['Data']['RIPTable']=sendP
+	return sendPacket
+	
+def expandTable(myTable,receivePacket,addr):
+	updateFlag=False
+	addrString=addr[0]+":"+str(addr[1])
+	receivePacket=convertForm1(receivePacket,addrString)
+	keysMy=[]
+	for key in myTable[selfHost].keys():
+		keysMy.append(key)
+	keysReceive=[]
+	for key in receivePacket[addrString].keys():
+		keysReceive.append(key)
+	myTable[addrString]=receivePacket[addrString]
+	for keyR in keysReceive:
+		if keyR not in keysMy:
+			myTable[selfHost][keyR]=[neighborWeight[addrString]+float(receivePacket[addrString][keyR][0]),addrString]
+			updateFlag=True
+		else:
+			if float(myTable[selfHost][keyR][0])>float(receivePacket[addrString][keyR][0])+neighborWeight[addrString]:
+				updateFlag=True
+				myTable[selfHost][keyR][0]=float(receivePacket[addrString][keyR][0])+neighborWeight[addrString]
+				myTable[selfHost][keyR][1]=addrString
+	return updateFlag
+
+def initialTable():
+	packet={}
+	packet[selfHost]={}
+	packet[selfHost][selfHost]=[float(0),selfHost]
+	for host in hosts:
+		hostIP,hostPort,hostCost=hostParse1(host)
+		packet[selfHost][hostIP+":"+hostPort]=[float(hostCost),hostIP+":"+hostPort]
+	return packet 
+
+def initialPacket():
+	packet={}
+	DATA={}
+	DATA['Type']='JRIP'
+	DATA['RIPTable']=[]
+	packet['SEQ']=0
+	packet['ACK']=0
+	packet['Data']=DATA
+	return packet
+
+def displayTable():
+	column1="destination"
+	column2="distance"
+	column3="next_hop"
+	destRow=myTable[selfHost]
+	destKeys=[]
+	for key in myTable[selfHost].keys():
+		destKeys.append(key)
+	table=[]
+	columnNames=[column1,column2,column3]
+	table.append(columnNames)
+	for dest in destKeys:
+		row=[]
+		row.append(dest)
+		row.append(myTable[selfHost][dest][0])
+		row.append(myTable[selfHost][dest][1])
+		table.append(row)
+	print(tabulate.tabulate(table))
+
+def tracePacket(recvPacket,myTable,sock):
+	ripTable=myTable
+	dest=recvPacket['Data']['Destination']
+	recvPacket['Data']['TRACE'].append(selfHost)
+	if dest==selfHost:
+		hostIP,hostPort=hostParse2(recvPacket['Data']['Origin'])
+		sock.sendto(json.dumps(recvPacket),(hostIP,int(hostPort)))
+	else:
+		hostIP,hostPort=hostParse2(ripTable[selfHost][dest][1])
+		sock.sendto(json.dumps(recvPacket),(hostIP,int(hostPort)))
+
+def packetInit():
+	packet={}
+	packet['SEQ']=0
+	packet['ACK']=0
+	packet['Data']={}
+	packet['Data']['Type']='JRIP'
+	packet['Data']['RIPTable']=[]
+	for host in hosts:
+		RIPelement={}
+		hostIP,hostPort,hostCost=hostParse1(host)
+		RIPelement['Dest']=hostIP+":"+hostPort
+		RIPelement['Next']=hostIP+":"+hostPort
+		RIPelement['Cost']=hostIP+":"+hostPort
+		packet['Data']['RIPTable'].append(RIPelement)
+	return packet
+
+def sendACK(sock,seq,Naddr):
+	packet=packetInit()
+	packet['ACK']=seq
+	packet['SEQ']=-1
+	packet['Data']=None
+	sendpacket=json.dumps(packet)
+	if random.random()>=loss:
+		sock.sendto(sendpacket,Naddr)
+
+def sendThePacket(sock,seq,Naddr):
+	sendPacket=convertForm2(myTable)
+	sendPacket['SEQ']=seq
+	sendPacket['ACK']=0
+	if random.random()>=loss:
+		sock.sendto(json.dumps(sendPacket),Naddr)
+
+nHash={}
+for host in hosts:
+	hostIP,hostPort,hostCost=hostParse1(host)
+	hostKey=(hostIP,int(hostPort))
+	nHash[hostKey]={}
+	nHash[hostKey]['window']=deque()
+	nHash[hostKey]['acknum']=0
+	nHash[hostKey]['count']=0
+	nHash[hostKey]['printFlag']=True
+	nHash[hostKey]['message']=deque()
+
+sendPacket=initialPacket()
+myTable=initialTable()
+updateFlag=True
+
+sock=socket.socket(socket.AF_INET, socket.SOCK_DGRAM) 
+sock.bind(('',port))
+sock.settimeout(0.001)
+sock.setblocking(0)
+
+for host in hosts:
+	hostIP,hostPort,hostCost=hostParse1(host)
+	hostAddr=(hostIP,int(hostPort))
+	for i in range(5):
+		sendThePacket(sock,i,hostAddr)
+		nHash[hostAddr]['window'].append([i,time.time()])
+
+while True:
+	if not updateFlag:
+		displayTable()
+	r,w,e=select.select([sock],[],[],0.5)
+	for s in r:
+		data,addr=s.recvfrom(1024)
+		recvPacket=json.loads(data)
+		seq=recvPacket['SEQ']
+		ack=recvPacket['ACK']
+		if recvPacket['Data']:
+			if recvPacket['Data']['Type']=='JRIP' and nHash[addr]['acknum']==seq:
+				nHash[addr]['acknum']+=1
+			if recvPacket['Data']['Type']=='JRIP':
+				sendACK(sock,nHash[addr]['acknum'],addr)
+			if recvPacket['Data']['Type']=='JRIP':
+				updateFlag=expandTable(myTable,recvPacket['Data']['RIPTable'],addr)
+			else:
+				tracePacket(recvPacket,myTable,sock)
+		else:
+			if ack>nHash[addr]['window'][0][0]:
+				while nHash[addr]['window'][0][0]<ack and updateFlag:
+					nHash[addr]['window'].popleft()
+					nHash[addr]['window'][0][1]=time.time()
+					nextseq=nHash[addr]['window'][-1][0]+1
+					sendThePacket(sock,nextseq,addr)
+					nHash[addr]['count']+=1
+					nHash[addr]['window'].append([nextseq,time.time()])
+	for host in hosts:
+		hostIP,hostPort,hostCost=hostParse1(host)
+		hostAddr=(hostIP,int(hostPort))
+		if time.time()-0.5>=nHash[hostAddr]['window'][0][1]:
+			resendseq=[]
+			for item in nHash[hostAddr]['window']:
+				resendseq.append(item[0])
+			nHash[hostAddr]['window'].clear()
+			for seqnum in resendseq:
+				sendThePacket(sock,seqnum,hostAddr)
+				nHash[hostAddr]['count']+=1
+				nHash[hostAddr]['window'].append([seqnum,time.time()])
+
+	
+
+
+
+
+
